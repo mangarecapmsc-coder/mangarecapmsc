@@ -322,13 +322,49 @@ const App: React.FC = () => {
   const [isImportingPrompts, setIsImportingPrompts] = useState<boolean>(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [previewStatus, setPreviewStatus] = useState<PreviewStatus>('idle');
-  const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('gemini-api-key') || '');
-  const [isKeySaved, setIsKeySaved] = useState<boolean>(() => !!localStorage.getItem('gemini-api-key'));
+  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [apiKeyStatus, setApiKeyStatus] = useState<'loading' | 'loaded' | 'error'>('loading');
+  const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const RETRY_ATTEMPTS = 5;
   const RETRY_DELAY_MS = 2000;
   const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  // Effect to fetch API key from Google Sheet on mount
+  useEffect(() => {
+    const fetchApiKey = async () => {
+      setApiKeyStatus('loading');
+      setApiKeyError(null);
+      
+      const sheetId = '1W9FoWup4LLOYHOqbnvGNLig-qXEt6LUr2WqiWSxY4q0';
+      const sheetUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=0&t=${Date.now()}`;
+
+      try {
+        const response = await fetch(sheetUrl);
+        if (!response.ok) {
+          throw new Error(`Could not fetch the sheet. (Status: ${response.status})`);
+        }
+        const csvText = await response.text();
+        
+        // Assumes the API key is the first value in the CSV (cell A1).
+        const key = csvText.trim().split('\n')[0].split(',')[0].trim();
+        
+        if (!key || key.length < 10) { // Basic validation
+          throw new Error("Invalid or empty API key found in the sheet.");
+        }
+
+        setApiKey(key);
+        setApiKeyStatus('loaded');
+      } catch (error: any) {
+        console.error("Failed to load API key from Google Sheet:", error);
+        setApiKeyError(`Failed to load API key from sheet: ${error.message}. Please ensure the sheet is public and the key is in cell A1.`);
+        setApiKeyStatus('error');
+      }
+    };
+
+    fetchApiKey();
+  }, []);
 
   // Effect to save settings to localStorage
   useEffect(() => {
@@ -339,17 +375,6 @@ const App: React.FC = () => {
   useEffect(() => {
     localStorage.setItem('tts-saved-prompts', JSON.stringify(savedPrompts));
   }, [savedPrompts]);
-
-  const handleSaveKey = () => {
-    if (apiKey.trim()) {
-      localStorage.setItem('gemini-api-key', apiKey.trim());
-      setIsKeySaved(true);
-    }
-  };
-
-  const handleEditKey = () => {
-    setIsKeySaved(false);
-  };
 
   const constructApiText = (baseText: string): string => {
     // The `voicePrompt` is prepended to the base text. This is the standard method
@@ -425,7 +450,7 @@ const App: React.FC = () => {
     for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
         try {
             const textToSend = constructApiText(textToProcess);
-            const audioData = await textToSpeech(textToSend, selectedVoice, apiKey);
+            const audioData = await textToSpeech(textToSend, selectedVoice, apiKey!);
             
             setFiles(prev => prev.map(f => {
                 if (f.id !== fileId) return f;
@@ -448,7 +473,7 @@ const App: React.FC = () => {
                         return { ...f, lines: updatedLines };
                     }));
                     
-                    const rewrittenText = await rewriteText(textToProcess, apiKey);
+                    const rewrittenText = await rewriteText(textToProcess, apiKey!);
                     textToProcess = rewrittenText; // Use the new text for subsequent attempts
                     
                     console.log(`Retrying with rewritten text: "${rewrittenText}"`);
@@ -485,11 +510,10 @@ const App: React.FC = () => {
 };
 
   const handleRetryLine = async (fileId: string, lineId: string) => {
-    if (!isKeySaved) return;
     const file = files.find(f => f.id === fileId);
     const line = file?.lines.find(l => l.id === lineId);
 
-    if (!file || !line || convertingFileId || isBatchConvertingAll) return;
+    if (!file || !line || convertingFileId || isBatchConvertingAll || !apiKey) return;
 
     await convertLineWithRetries(fileId, line);
 
@@ -505,9 +529,8 @@ const App: React.FC = () => {
   };
 
   const handleBatchConvert = async (fileId: string) => {
-    if (!isKeySaved) return;
     const fileToConvert = files.find(f => f.id === fileId);
-    if (!fileToConvert) {
+    if (!fileToConvert || !apiKey) {
         return;
     }
     
@@ -522,7 +545,7 @@ const App: React.FC = () => {
   };
   
   const handleGenerateAll = async () => {
-    if (!isKeySaved) return;
+    if (!apiKey) return;
     setIsBatchConvertingAll(true);
     const filesToConvert = files.filter(f => f.status === 'pending');
     for (const file of filesToConvert) {
@@ -594,7 +617,7 @@ const App: React.FC = () => {
   };
 
   const handlePreviewVoice = async () => {
-    if (!isKeySaved) return;
+    if (!apiKey) return;
     if (!previewText.trim()) {
         setGlobalError("Please enter some text to preview.");
         return;
@@ -792,7 +815,7 @@ const App: React.FC = () => {
 
 
   const isConvertingAny = !!convertingFileId || isBatchConvertingAll;
-  const isActionLocked = isConvertingAny || !isKeySaved;
+  const isActionLocked = isConvertingAny || apiKeyStatus !== 'loaded';
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col items-center p-4 sm:p-6 font-sans">
@@ -803,58 +826,43 @@ const App: React.FC = () => {
         </header>
 
         <main className="space-y-6">
-            {isKeySaved ? (
-                <div className="bg-slate-800/50 border border-slate-700 text-slate-300 px-4 py-3 rounded-lg">
-                    <div className="flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-3">
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                            <div>
-                                <h3 className="text-md font-bold text-green-400">API Key is Configured</h3>
-                                <p className="text-sm text-slate-400 mt-1">
-                                    The application is ready to make requests.
-                                </p>
-                            </div>
+             <div className="bg-slate-800/50 border border-slate-700 text-slate-300 px-4 py-3 rounded-lg">
+                {apiKeyStatus === 'loading' && (
+                    <div className="flex items-center gap-3">
+                        <Spinner className="h-6 w-6 text-sky-400" />
+                        <div>
+                            <h3 className="text-md font-bold text-sky-400">Loading API Key...</h3>
+                            <p className="text-sm text-slate-400 mt-1">
+                                Fetching API Key from the configured Google Sheet.
+                            </p>
                         </div>
-                        <button onClick={handleEditKey} className="text-sm font-semibold bg-slate-600 hover:bg-slate-500 text-white py-1 px-3 rounded-md">
-                            Change Key
-                        </button>
                     </div>
-                </div>
-            ) : (
-                <div className="bg-sky-900/50 border border-sky-500 text-sky-300 px-4 py-3 rounded-lg space-y-2">
-                    <div className="flex items-start gap-3">
+                )}
+                {apiKeyStatus === 'loaded' && (
+                    <div className="flex items-center gap-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <div>
+                            <h3 className="text-md font-bold text-green-400">API Key Loaded Successfully</h3>
+                            <p className="text-sm text-slate-400 mt-1">
+                                The application is ready to make requests.
+                            </p>
+                        </div>
+                    </div>
+                )}
+                {apiKeyStatus === 'error' && (
+                    <div className="flex items-start gap-3 text-red-300">
                         <WarningIcon />
                         <div>
-                            <h3 className="text-lg font-bold">Enter Your Gemini API Key</h3>
+                            <h3 className="text-lg font-bold">Failed to Load API Key</h3>
                             <p className="text-sm mt-1">
-                                To use this application, please enter your Google Gemini API key below. Your key is stored only in your browser's local storage.
-                            </p>
-                            <div className="flex gap-2 mt-3">
-                                <input
-                                    type="password"
-                                    value={apiKey}
-                                    onChange={(e) => setApiKey(e.target.value)}
-                                    placeholder="Enter your API key"
-                                    className="flex-grow w-full bg-slate-900/50 border border-slate-600 rounded-md py-2 px-3 text-white focus:ring-sky-500 focus:border-sky-500"
-                                />
-                                <button
-                                    onClick={handleSaveKey}
-                                    disabled={!apiKey.trim()}
-                                    className="bg-sky-600 hover:bg-sky-500 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded-lg"
-                                >
-                                    Save Key
-                                </button>
-                            </div>
-                            <p className="text-xs text-slate-500 mt-2">
-                                You can get your API key from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="underline hover:text-sky-400">Google AI Studio</a>.
+                                {apiKeyError}
                             </p>
                         </div>
                     </div>
-                </div>
-            )}
-
+                )}
+            </div>
 
             <div className='flex flex-col gap-4 bg-slate-800 rounded-lg shadow-2xl p-6'>
                 <div>
@@ -1037,7 +1045,7 @@ const App: React.FC = () => {
                     ))}
                 </div>
             ) : (
-                 !isKeySaved ? null : (
+                 apiKeyStatus !== 'loaded' ? null : (
                     <div className="border-2 border-dashed border-slate-600 rounded-lg p-12 text-center text-slate-500">
                         <p className="font-semibold text-lg">Upload files to begin</p>
                         <p className="text-sm mt-1">Your uploaded `.txt` and `.srt` files will appear here for conversion.</p>
