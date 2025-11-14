@@ -1,0 +1,5 @@
+{
+  "name": "API Text to Speech Batch Converter",
+  "description": "An application that reads a formatted .txt file, batch converts each line to an audio file using the Gemini API with selectable voices, and packages the results into a downloadable ZIP archive.",
+  "requestFramePermissions": []
+}
